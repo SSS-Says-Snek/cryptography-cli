@@ -42,6 +42,8 @@ KEY_LEN = 4
 
 
 def gf_mult_bytes(p1: int, p2: int):
+    """Sick multiplication"""
+
     product = p1 if p2 & 1 == 1 else 0
     temp = p1
 
@@ -86,28 +88,28 @@ def shift_rows(state: bytearray):
     """
 
     for i in range(1, NB): # start from the 2nd row
-        row = (state[NB*i]) | (state[NB*i + 1] << 8) | (state[NB*i + 2] << 16) | (state[NB*i + 3] << 24)
+        row = (state[i]) | (state[i + 1*NB] << 8) | (state[i + 2*NB] << 16) | (state[i + 3*NB] << 24)
         wrapping_part = row & ((1 << 8*i) - 1)
         new_row = (row >> 8*i) | (wrapping_part << 32-8*i)
         
         for j in range(4):
-            state[4*i + j] = (new_row & 0xff << 8*j) >> 8*j
+            state[i + 4*j] = (new_row & 0xff << 8*j) >> 8*j
 
 def mix_columns(state: bytearray):
     "Multiplies polynomials column wise"
 
     for i in range(NB):
-        column = (state[i]) | (state[i + 4] << 8) | (state[i + 8] << 16) | (state[i + 12] << 24)
+        column = (state[4*i]) | (state[4*i + 1] << 8) | (state[4*i + 2] << 16) | (state[4*i + 3] << 24)
         new_column = gf_mult_words(column, 0x03010102)
         for j in range(4):
-            state[i + 4*j] = (new_column & 0xff << 8*j) >> 8*j
+            state[4*i + j] = (new_column & 0xff << 8*j) >> 8*j
 
 def add_round_key(state: bytearray, round_key: list[int]):
     """Add keys column wise"""
 
     for i in range(NB):
         for j in range(4):
-            state[i + 4*j] ^= (round_key[i] & 0xff << 24-8*j) >> 24-8*j
+            state[4*i + j] ^= (round_key[i] & 0xff << 24-8*j) >> 24-8*j
 
 def sub_bytes(state: bytearray):
     """Substitute bytes sussy ohio rizz wise"""
@@ -161,9 +163,11 @@ def cipher(plain: bytes, round_keys: list[int]):
 
 key = bytes([0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c])
 expansion = key_expansion(key)
-plaintext = bytes([0x32, 0x88, 0x31, 0xe0, 0x43, 0x5a, 0x31, 0x37, 0xf6, 0x30, 0x98, 0x07, 0xa8, 0x8d, 0xa2, 0x34])
+plaintext = bytes([0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34])
+plaintext = bytes([97] * 16)
 
 print(f"Keyhex: {key.hex()}")
+print(f"Key: {' '.join(hex(b)[2:] for b in key)}")
 ciphertext = cipher(plaintext, expansion)
 print(f"Cipher: {ciphertext}")
 print(f"Cipherhex: {ciphertext.hex()}")

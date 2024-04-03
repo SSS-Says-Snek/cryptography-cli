@@ -1,3 +1,6 @@
+import base64
+from typing import Literal, Callable
+
 S_BOX = (
     0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
     0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
@@ -37,8 +40,15 @@ INV_S_BOX = (
 )
 
 NB = 4
-NUM_ROUNDS = 10
-KEY_LEN = 4
+BLOCK_SIZE = 16 # Bytes
+
+AES_128_ROUNDS = 10
+AES_192_ROUNDS = 12
+AES_256_ROUNDS = 14
+
+AES_128_KEYLEN = 4
+AES_192_KEYLEN = 6
+AES_256_KEYLEN = 8
 
 
 def gf_mult_bytes(p1: int, p2: int):
@@ -122,18 +132,18 @@ def sub_word(word: int):
 
     return S_BOX[word & 0xff] | (S_BOX[(word & 0xff00) >> 8] << 8) | (S_BOX[(word & 0xff0000) >> 16] << 16) | (S_BOX[(word & 0xff000000) >> 24]) << 24
 
-def key_expansion(key: bytes):
-    """Converts itty bitty 128-bit key to beefy thing"""
+def key_expansion(key: bytes, keylen: int, num_rounds: int):
+    """Converts itty bitty 128/192/256-bit key to beefy thing"""
 
     temp = 0
-    expanded_key = [0] * (4 * (NUM_ROUNDS + 1)) # 10 rounds + 1 extra thing
-    for i in range(4):
+    expanded_key = [0] * (4 * (num_rounds + 1)) # NR rounds + 1 extra thing
+    for i in range(keylen):
         expanded_key[i] = (key[4*i] << 24) | (key[4*i + 1] << 16) | (key[4*i + 2] << 8) | (key[4*i + 3]) # Combine to word
 
     rcon = 0x01000000
-    for i in range(4, 4 * (NUM_ROUNDS + 1)):
+    for i in range(keylen, 4 * (num_rounds + 1)):
         temp = expanded_key[i - 1]
-        if i % 4 == 0:
+        if i % keylen == 0:
             temp = sub_word(rot_word(temp)) ^ rcon
             carry = rcon & 0x80000000
 
@@ -141,35 +151,207 @@ def key_expansion(key: bytes):
             if carry: # will overflow, must XOR
                 rcon &= 0xffffffff
                 rcon ^= 0x1b000000
-        expanded_key[i] = expanded_key[i - 4] ^ temp
+        elif keylen == 8 and i % 8  == 4: # AES-256 special case
+            temp = sub_word(temp)
+        expanded_key[i] = expanded_key[i - keylen] ^ temp
+    print("E", " ".join(map(hex, expanded_key)))
+    print("len", len(expanded_key))
     return expanded_key
 
-def cipher(plain: bytes, round_keys: list[int]):
+def cipher(plain: bytes, round_keys: list[int], num_rounds: int):
     state = bytearray(plain)
-    add_round_key(state, round_keys[0:4])
+    add_round_key(state, round_keys[:NB])
 
     # First N-1 rounds
-    for i in range(NUM_ROUNDS - 1):
+    for i in range(num_rounds - 1):
         sub_bytes(state)
         shift_rows(state)
         mix_columns(state)
-        add_round_key(state, round_keys[(i+1)*4:(i+2)*4]) # Add round keys following 0:4
+        add_round_key(state, round_keys[(i+1)*NB:(i+2)*NB]) # Add round keys following
 
     # Last round; no mix columns
     sub_bytes(state)
     shift_rows(state)
-    add_round_key(state, round_keys[10*4:])
+    add_round_key(state, round_keys[-NB:])
     return bytes(state)
 
-key = bytes([0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c])
-expansion = key_expansion(key)
-plaintext = bytes([0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34])
-plaintext = bytes([97] * 16)
+####################################
+# INVERSE                          #
+####################################
 
-print(f"Keyhex: {key.hex()}")
-print(f"Key: {' '.join(hex(b)[2:] for b in key)}")
-ciphertext = cipher(plaintext, expansion)
-print(f"Cipher: {ciphertext}")
-print(f"Cipherhex: {ciphertext.hex()}")
-print(f"Cipherbase: {__import__('base64').b64encode(ciphertext)}")
+def inv_shift_rows(state: bytearray):
+    """
+    Shifts rows... row-wise
+    
+    0   1   2   3       0   1   2   3
+    4   5   6   7 ==|   7   4   5   6
+    8   9  10  11 ==|   10 11   8   9
+    12 13  14  15       13 14  15  12
 
+    I could've just hardcoded it but booo
+    """
+
+    for i in range(1, NB): # start from the 2nd row
+        row = (state[i]) | (state[i + 1*NB] << 8) | (state[i + 2*NB] << 16) | (state[i + 3*NB] << 24)
+        part_to_move = row & ((1 << 32-8*i) - 1)
+        wrapping_part = row >> 32-8*i
+        new_row = (wrapping_part) | (part_to_move << 8*i)
+        
+        for j in range(4):
+            state[i + 4*j] = (new_row & 0xff << 8*j) >> 8*j
+
+def inv_mix_columns(state: bytearray):
+    "Multiplies polynomials column wise"
+
+    for i in range(NB):
+        column = (state[4*i]) | (state[4*i + 1] << 8) | (state[4*i + 2] << 16) | (state[4*i + 3] << 24)
+        new_column = gf_mult_words(column, 0x0b0d090e)
+        for j in range(4):
+            state[4*i + j] = (new_column & 0xff << 8*j) >> 8*j
+
+def inv_sub_bytes(state: bytearray):
+    """Substitute bytes sussy ohio rizz wise"""
+
+    for i in range(NB * 4):
+        state[i] = INV_S_BOX[state[i]]
+
+def inv_cipher(cipher: bytes, round_keys: list[int], num_rounds: int):
+    state = bytearray(cipher)
+    add_round_key(state, round_keys[NB:])
+
+    for i in range(num_rounds - 1):
+        inv_shift_rows(state)
+        inv_sub_bytes(state)
+        add_round_key(state, round_keys[-(i+2)*NB:-(i+1)*NB]) # Backtrack the key words
+        inv_mix_columns(state)
+
+    inv_shift_rows(state)
+    inv_sub_bytes(state)
+    add_round_key(state, round_keys[:NB])
+
+    return bytes(state)
+
+####################################
+# API STUFF                        #
+####################################
+
+def encrypt_ecb_factory(algo: Literal[128, 192, 256]) -> Callable[[bytes, bytes], bytes]:
+    if algo == 128:
+        keylen = AES_128_KEYLEN
+        rounds = AES_128_ROUNDS
+    elif algo == 192:
+        keylen = AES_192_KEYLEN
+        rounds = AES_192_ROUNDS
+    elif algo == 256:
+        keylen = AES_256_KEYLEN
+        rounds = AES_256_ROUNDS
+    else:
+        raise ValueError("Unknown algorithm (must be 128, 192, or 256)")
+
+    def inner(plaintext: bytes, key: bytes) -> bytes:
+        expanded_key = key_expansion(key, keylen, rounds)
+
+        i = -1 # Teehee; counteract the (i+1)*BLOCK_SIZE
+        ciphertext = bytearray()
+        for i in range(len(plaintext) // BLOCK_SIZE):
+            block = plaintext[i*BLOCK_SIZE:(i+1)*BLOCK_SIZE]
+            ciphertext.extend(cipher(block, expanded_key, rounds))
+        if len(plaintext) % BLOCK_SIZE != 0:
+            final_block = plaintext[(i+1)*BLOCK_SIZE:].ljust(BLOCK_SIZE, b"\x00") # Add padding to remainder of block (ooh spicy loop variable usage)
+            ciphertext.extend(cipher(final_block, expanded_key, rounds))
+
+        return bytes(ciphertext)
+    return inner
+
+def decrypt_ecb_factory(algo: Literal[128, 192, 256]) -> Callable[[bytes, bytes], bytes]:
+    if algo == 128:
+        keylen = AES_128_KEYLEN
+        rounds = AES_128_ROUNDS
+    elif algo == 192:
+        keylen = AES_192_KEYLEN
+        rounds = AES_192_ROUNDS
+    elif algo == 256:
+        keylen = AES_256_KEYLEN
+        rounds = AES_256_ROUNDS
+    else:
+        raise ValueError("Unknown algorithm (must be 128, 192, or 256)")
+
+    def inner(ciphertext: bytes, key: bytes) -> bytes:
+        if len(ciphertext) % BLOCK_SIZE != 0:
+            raise ValueError("Invalid ciphertext (not a multiple of 16 bytes!)")
+
+        expanded_key = key_expansion(key, keylen, rounds)
+        plaintext = bytearray()
+        for i in range(len(ciphertext) // BLOCK_SIZE):
+            block = ciphertext[i*BLOCK_SIZE:(i+1)*BLOCK_SIZE]
+            plaintext.extend(inv_cipher(block, expanded_key, rounds))
+        
+        return bytes(plaintext)
+    return inner
+
+encrypt_128_ecb = encrypt_ecb_factory(128)
+decrypt_128_ecb = decrypt_ecb_factory(128)
+
+encrypt_192_ecb = encrypt_ecb_factory(192)
+decrypt_192_ecb = decrypt_ecb_factory(192)
+
+encrypt_256_ecb = encrypt_ecb_factory(256)
+decrypt_256_ecb = decrypt_ecb_factory(256)
+
+def decrypt_128_ecb_base64(ciphertext: bytes, key: bytes) -> bytes:
+    actual = base64.b64decode(ciphertext)
+    return decrypt_128_ecb(actual, key)
+
+def decrypt_192_ecb_base64(ciphertext: bytes, key: bytes) -> bytes:
+    actual = base64.b64decode(ciphertext)
+    return decrypt_192_ecb(actual, key)
+
+def decrypt_256_ecb_base64(ciphertext: bytes, key: bytes) -> bytes:
+    actual = base64.b64decode(ciphertext)
+    return decrypt_256_ecb(actual, key)
+
+if __name__ == "__main__":
+    ECB_FUNCTIONS = {
+        128: (encrypt_128_ecb, decrypt_128_ecb_base64),
+        192: (encrypt_192_ecb, decrypt_192_ecb_base64),
+        256: (encrypt_256_ecb, decrypt_256_ecb_base64)
+    }
+
+    print("Hey")
+    algo = input("Enter desired AES key size (128/192/256): ")
+    if not algo.isdigit() and algo not in (128, 192, 256):
+        print("You suck; assumming AES-256")
+        algo = 256
+    algo = int(algo)
+
+    encrypt_ecb, decrypt_ecb = ECB_FUNCTIONS[algo]
+
+    keyhex = input(f"Enter AES-{algo} key (Hex, no spaces): ")
+    if len(keyhex) != algo // 4: # 128/4 = 32, 192/4 = 48, 256/4 = 64
+        print("You suck: Assumming key with all 0s")
+        keyhex = "00" * (algo // 8)
+
+    key = bytes.fromhex(keyhex)
+    print("=========")
+    print(f"Key: {' '.join(hex(b)[2:] for b in key)}")
+    print(f"Key: {key.hex()}")
+    print("=========")
+
+    enc_or_dec = input("Wanna encrypt or decrypt? (e/d) ").lower()
+    if enc_or_dec == "e":
+        plaintext = input(f"Enter your text; it will be encrypted with AES-{algo} in ECB mode. ")
+
+        ciphertext = encrypt_ecb(plaintext.encode(), key)
+        print("=========")
+        print(f"Cipher: {ciphertext}")
+        print("=====")
+        print(f"Cipherhex: {ciphertext.hex()}")
+        print("=====")
+        print(f"Cipherbase: {base64.b64encode(ciphertext)}")
+        print("=========")
+    elif enc_or_dec == "d":
+        ciphertext = input(f"Enter your base64 ciphertext; it will be decrypted with AES-{algo} in ECB mode. ")
+        plaintext = decrypt_ecb(ciphertext.encode(), key)
+        print("=========")
+        print(f"Plaintext:\n{plaintext}")
+        print("=========")

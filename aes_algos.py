@@ -216,28 +216,16 @@ def inv_sub_bytes(state: bytearray):
 def inv_cipher(cipher: bytes, round_keys: list[int], num_rounds: int):
     state = bytearray(cipher)
     add_round_key(state, round_keys[-NB:])
-    print(f"AAA {round_keys[-NB:]}")
-    print("1st", state)
 
     for i in range(num_rounds - 1, 0, -1):
-        print(f"-----I: {i}-----")
-        print(f"key for this round: {round_keys[(i+0)*NB:(i+1)*NB]}")
         inv_shift_rows(state)
-        print("after shift", state.hex())
         inv_sub_bytes(state)
-        print("after sub", state.hex())
         add_round_key(state, round_keys[(i+0)*NB:(i+1)*NB]) # Backtrack the key words
-        print("after key", state.hex())
         inv_mix_columns(state)
-        print("after mix", state.hex())
 
-    print("Round LAST")
     inv_shift_rows(state)
-    print("after shift", state.hex())
     inv_sub_bytes(state)
-    print("after sub", state.hex())
     add_round_key(state, round_keys[:NB])
-    print("DONE!", state.hex())
 
     return bytes(state)
 
@@ -310,7 +298,6 @@ decrypt_256_ecb = decrypt_ecb_factory(256)
 
 def decrypt_128_ecb_base64(ciphertext: bytes, key: bytes) -> bytes:
     actual = base64.b64decode(ciphertext)
-    print(actual)
     return decrypt_128_ecb(actual, key)
 
 def decrypt_192_ecb_base64(ciphertext: bytes, key: bytes) -> bytes:
@@ -332,7 +319,6 @@ if __name__ == "__main__":
     plain = bytes.fromhex("00112233445566778899aabbccddeeff")
     ke = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
     ciph = b'i\xc4\xe0\xd8j{\x040\xd8\xcd\xb7\x80p\xb4\xc5Z'
-    print('C', inv_cipher(ciph, key_expansion(ke, 4, 10), 10))
     algo = input("Enter desired AES key size (128/192/256): ")
     if not algo.isdigit() and algo not in (128, 192, 256):
         print("You suck; assumming AES-256")
